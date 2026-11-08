@@ -36,7 +36,6 @@ pub struct AuthResponse {
     pub user_id: Uuid,
 }
 
-// 註冊
 pub async fn register_handler(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
@@ -61,7 +60,6 @@ pub async fn register_handler(
     }
 }
 
-// 登入
 pub async fn login_handler(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
@@ -81,7 +79,6 @@ pub async fn login_handler(
     Ok(Json(AuthResponse { message: "登入成功".to_string(), user_id: user.id }))
 }
 
-// Google OAuth 導向
 pub async fn google_login_handler() -> Result<Redirect, StatusCode> {
     let client = google_oauth_client().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let (auth_url, _) = client.authorize_url(CsrfToken::new_random)
@@ -107,7 +104,6 @@ fn google_oauth_client() -> Result<BasicClient, String> {
     ).set_redirect_uri(RedirectUrl::new(rurl).unwrap()))
 }
 
-// Google Callback
 pub async fn google_callback_handler(
     State(state): State<AppState>, Query(query): Query<AuthQuery>
 ) -> Result<Json<serde_json::Value>, StatusCode> {
