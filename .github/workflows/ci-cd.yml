@@ -1,0 +1,31 @@
+# ==========================================
+  # 階段三：自動化遠端部署 (Deploy to VPS)
+  # ==========================================
+  deploy:
+    name: Deploy to VPS via SSH
+    needs: build-and-push # 確保映像檔已經成功推送至 GHCR
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # 只在 main 分支推送時觸發部署
+
+    steps:
+      - name: 透過 SSH 連線並執行部署指令
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script: |
+            cd /home/ubuntu/omsi2-platform
+            
+            # 1. 登入 GitHub Container Registry (若套件庫是公開的，此步驟可省略)
+            # echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # 2. 拉取最新的 Docker 映像檔
+            docker compose pull backend
+            
+            # 3. 重啟容器以套用最新版本（自動停止舊容器並啟動新容器）
+            docker compose up -d --no-deps backend
+            
+            # 4. 清理無用的舊映像檔，釋放 VPS 磁碟空間
+            docker image prune -f
