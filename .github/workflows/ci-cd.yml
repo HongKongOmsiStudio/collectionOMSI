@@ -1,31 +1,128 @@
-# ==========================================
-  # 階段三：自動化遠端部署 (Deploy to VPS)
+name: OMSI 2 CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
   # ==========================================
-  deploy:
-    name: Deploy to VPS via SSH
-    needs: build-and-push # 確保映像檔已經成功推送至 GHCR
+  # 1. 測試與靜態檢查階段 (Test & Lint)
+  # ==========================================
+  test:
+    name: Rust Backend Test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # 只在 main 分支推送時觸發部署
+
+    # 啟動一個 PostgreSQL 服務容器供測試使用
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: omsi_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: omsi2_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
-      - name: 透過 SSH 連線並執行部署指令
-        uses: appleboy/ssh-action@v1.0.3
+      - name: 檢查原始碼
+        uses: actions/checkout@v4
+
+      - name: 安裝 Rust 工具鏈
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: 快取 Cargo 依賴
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "backend"
+
+      - name: 執行 Rust 程式碼格式與靜態檢查
+        working-directory: ./backend
+        run: |
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+
+      - name: 執行 Cargo 測試 (啟用 SQLx 離線模式或連線測試 DB)
+        working-directory: ./backend
+        env:
+          DATABASE_URL: postgres://omsi_user:test_password@localhost:5432/omsi2_db
+          SQLX_OFFLINE: true
+        run: cargo test
+
+  # ==========================================
+  # 2. Docker 映像檔建置與推送 (Build & Push)
+  # ==========================================
+  build-and-push:
+    name: Build & Push Docker Image
+    needs: test # 確保測試全數通過才執行
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' # 僅在 Push 觸發時打包上傳
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 檢查原始碼
+        uses: actions/checkout@v4
+
+      - name: 登入 GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 設定 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 建置並推送後端映像檔
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================
+  # 3. 遠端 VPS 零停機自動部署 (Deploy via SSH)
+  # ==========================================
+  deploy:
+    name: Deploy to VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: 透過 SSH 連線至遠端 VPS 並更新服務
+        uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
+          port: ${{ secrets.VPS_PORT | default(22) }}
           script: |
-            cd /home/ubuntu/omsi2-platform
+            # 進入專案部署目錄
+            cd /opt/omsi2-platform
             
-            # 1. 登入 GitHub Container Registry (若套件庫是公開的，此步驟可省略)
-            # echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # 登入 GHCR (若映像檔是公開的則可略過)
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
-            # 2. 拉取最新的 Docker 映像檔
+            # 拉取最新映像檔並進行零停機更新
             docker compose pull backend
-            
-            # 3. 重啟容器以套用最新版本（自動停止舊容器並啟動新容器）
             docker compose up -d --no-deps backend
             
-            # 4. 清理無用的舊映像檔，釋放 VPS 磁碟空間
+            # 清理舊的無用映像檔
             docker image prune -f
