@@ -1,53 +1,93 @@
 mod state;
-mod models;
-mod handlers;
+mod error;
+mod utils;
 
-use axum::{
-    routing::{get, post, delete},
-    Router,
-};
-use sqlx::PgPool;
-use std::net::SocketAddr;
-use state::AppState;
-
-pub fn create_app(db_pool: PgPool) -> Router {
-    let app_state = AppState { db: db_pool };
-
-    let public_routes = Router::new()
-        .route("/api/v1/auth/register", post(handlers::auth::register_handler))
-        .route("/api/v1/auth/login", post(handlers::auth::login_handler))
-        .route("/api/v1/auth/google", get(handlers::auth::google_login_handler))
-        .route("/api/v1/auth/google/callback", get(handlers::auth::google_callback_handler))
-        .route("/api/v1/resources", get(handlers::resource::search_resources_handler))
-        .route("/api/v1/resources/:id", get(handlers::resource::get_resource_detail));
-
-    let protected_routes = Router::new()
-        .route("/api/v1/resources", post(handlers::resource::publish_resource_handler))
-        .route("/api/v1/resources/:id/favorite", post(handlers::resource::add_favorite_handler).delete(handlers::resource::remove_favorite_handler))
-        .route("/api/v1/resources/:id/like", post(handlers::resource::like_resource_handler))
-        .route("/api/v1/resources/:id/rate", post(handlers::resource::rate_resource_handler));
-
-    Router::new()
-        .merge(public_routes)
-        .merge(protected_routes)
-        .with_state(app_state)
-}
+use axum::{routing::{get, post}, Router};
+use std::{net::SocketAddr, time::Duration};
+use tokio::signal;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower::limit::RateLimitLayer;
+use http::{Method, HeaderValue};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use state::{init_db_pool, AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("必須設定 DATABASE_URL");
 
-    let db_pool = PgPool::connect(&database_url).await?;
-    println!("📦 成功連線至 PostgreSQL 資料庫！");
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=debug".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
-    let app = create_app(db_pool);
+    let db_pool = match init_db_pool().await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("❌ 初始化資料庫連線池失敗: {:?}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let app_state = AppState { db: db_pool };
+
+    let cors = CorsLayer::new()
+        .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers(tower_http::cors::Any)
+        .allow_credentials(true);
+
+    let rate_limiter = RateLimitLayer::new(20, Duration::from_secs(1));
+
+    let app = Router::new()
+        .route("/health", get(health_check_handler))
+        .with_state(app_state.clone())
+        .layer(rate_limiter)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    println!("🚀 OMSI 2 平台後端已啟動於 http://{}", addr);
-
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    println!("🚀 伺服器運行中：http://{}", addr);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(app_state))
+        .await?;
 
     Ok(())
+}
+
+async fn health_check_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> &'static str {
+    match sqlx::query("SELECT 1").execute(&state.db).await {
+        Ok(_) => "Database is healthy!",
+        Err(_) => "Database connection error!",
+    }
+}
+
+async fn shutdown_signal(state: AppState) {
+    let ctrl_c = async {
+        signal::ctrl_c().await.expect("無法安裝 Ctrl+C 訊號處理器");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("無法安裝 SIGTERM 訊號處理器")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    println!("\n⚠️ 收到關閉訊號，正在執行優雅關閉...");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    state.db.close().await;
+    println!("✅ 資料庫連線已安全關閉。");
 }
