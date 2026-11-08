@@ -8,7 +8,6 @@ use uuid::Uuid;
 use crate::state::AppState;
 use crate::models::resource::*;
 
-// 取得資源詳情
 pub async fn get_resource_detail(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -37,7 +36,6 @@ pub async fn get_resource_detail(
     }))
 }
 
-// 發布資源
 pub async fn publish_resource_handler(
     State(state): State<AppState>,
     Extension(user_id): Extension<Uuid>,
@@ -67,7 +65,6 @@ pub struct ResourceSummaryResponse {
     pub author_username: String,
 }
 
-// 搜尋與篩選
 pub async fn search_resources_handler(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
@@ -101,7 +98,6 @@ pub async fn search_resources_handler(
     Ok(Json(list))
 }
 
-// 收藏
 pub async fn add_favorite_handler(State(state): State<AppState>, Extension(user_id): Extension<Uuid>, Path(res_id): Path<Uuid>) -> Result<StatusCode, StatusCode> {
     sqlx::query!(r#"INSERT INTO favorites (user_id, resource_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"#, user_id, res_id)
         .execute(&state.db).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -114,7 +110,6 @@ pub async fn remove_favorite_handler(State(state): State<AppState>, Extension(us
     Ok(StatusCode::NO_CONTENT)
 }
 
-// 按讚
 pub async fn like_resource_handler(State(state): State<AppState>, Extension(user_id): Extension<Uuid>, Path(res_id): Path<Uuid>) -> Result<StatusCode, StatusCode> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let inserted = sqlx::query!(r#"INSERT INTO resource_likes (user_id, resource_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING resource_id"#, user_id, res_id)
@@ -131,7 +126,6 @@ pub async fn like_resource_handler(State(state): State<AppState>, Extension(user
 #[derive(Deserialize)]
 pub struct RateRequest { pub rating: i16, pub comment: Option<String> }
 
-// 評分
 pub async fn rate_resource_handler(State(state): State<AppState>, Extension(user_id): Extension<Uuid>, Path(res_id): Path<Uuid>, Json(payload): Json<RateRequest>) -> Result<StatusCode, StatusCode> {
     if payload.rating < 1 || payload.rating > 5 { return Err(StatusCode::BAD_REQUEST); }
     sqlx::query!(
