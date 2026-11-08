@@ -1,38 +1,48 @@
+mod state;
+mod models;
+mod handlers;
+
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-    Json, Router,
+    routing::{get, post, delete},
+    Router,
 };
 use sqlx::PgPool;
 use std::net::SocketAddr;
+use state::AppState;
 
-// 假設你的 AppState 包含資料庫連線池
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 載入 .env 檔案中的環境變數 (例如 DATABASE_URL)
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("必須在環境變數中設定 DATABASE_URL");
+    let database_url = std::env::var("DATABASE_URL").expect("必須設定 DATABASE_URL");
 
-    // 2. 建立 PostgreSQL 資料庫連線池 (Connection Pool)
-    let pool = PgPool::connect(&database_url).await.map_err(|e| {
-        eprintln!("無法連線至資料庫: {}", e);
-        e
-    })?;
-    
+    let db_pool = PgPool::connect(&database_url).await?;
     println!("📦 成功連線至 PostgreSQL 資料庫！");
 
-    // 3. 建立 Axum Router 並綁定路由與 State
+    let app_state = AppState { db: db_pool };
+
+    // 公開路由
+    let public_routes = Router::new()
+        .route("/auth/register", post(handlers::auth::register_handler))
+        .route("/auth/login", post(handlers::auth::login_handler))
+        .route("/auth/google", get(handlers::auth::google_login_handler))
+        .route("/auth/google/callback", get(handlers::auth::google_callback_handler))
+        .route("/resources", get(handlers::resource::search_resources_handler))
+        .route("/resources/:id", get(handlers::resource::get_resource_detail));
+
+    // 受保護路由 (模擬 auth_middleware，實務上可加上認證 Layer)
+    let protected_routes = Router::new()
+        .route("/resources", post(handlers::resource::publish_resource_handler))
+        .route("/resources/:id/favorite", post(handlers::resource::add_favorite_handler).delete(handlers::resource::remove_favorite_handler))
+        .route("/resources/:id/like", post(handlers::resource::like_resource_handler))
+        .route("/resources/:id/rate", post(handlers::resource::rate_resource_handler));
+
     let app = Router::new()
-        .route("/api/v1/resources/:id", get(get_resource_detail))
-        .with_state(pool); // 將 PgPool 直接作為共用 State 注入所有 Handler
+        .nest("/api/v1", public_routes.merge(protected_routes))
+        .with_state(app_state);
 
-    // 4. 設定伺服器監聽位址 (例如 127.0.0.1:8080)
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    println!("🚀 OMSI 2 後端伺服器已啟動，正在聆聽 http://{}", addr);
+    println!("🚀 OMSI 2 平台後端已啟動於 http://{}", addr);
 
-    // 5. 使用 tokio 及 axum::serve 啟動服務
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
